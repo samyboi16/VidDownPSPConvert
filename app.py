@@ -1,10 +1,12 @@
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 import yt_dlp
 from flask import Flask, abort, render_template, request, send_from_directory
+from werkzeug.utils import secure_filename
 
 BASE_DIR = Path(__file__).resolve().parent
 DOWNLOAD_DIR = BASE_DIR / "downloads"
@@ -99,13 +101,21 @@ def psp_preset_settings():
 
 def convert_to_psp_mp4(input_path: str, output_dir: Path):
     settings = psp_preset_settings()
-    output_file = output_dir / f"{Path(input_path).stem}_psp.mp4"
+    input_file = Path(input_path).resolve()
+    if not input_file.is_file():
+        raise FileNotFoundError(f"Uploaded video was not saved: {input_file}")
+
+    ffmpeg_executable = shutil.which("ffmpeg")
+    if not ffmpeg_executable:
+        raise FileNotFoundError("FFmpeg was not found in PATH. Install FFmpeg and restart the app.")
+
+    output_file = output_dir / f"{input_file.stem}_psp.mp4"
 
     ffmpeg_cmd = [
-        "ffmpeg",
+        ffmpeg_executable,
         "-y",
         "-i",
-        str(input_path),
+        str(input_file),
         "-vf",
         (
             f"scale={settings['width']}:{settings['height']}:force_original_aspect_ratio=decrease,"
@@ -186,21 +196,20 @@ def convert_video():
     if not uploaded_file or not uploaded_file.filename:
         return render_template(
             "dashboard.html",
-            error="Please select a .webm or .mkv file to convert.",
+            error="Please select a video file to convert.",
             downloads=list_recent_files(DOWNLOAD_DIR),
             converted=list_recent_files(CONVERTED_DIR),
         )
 
-    extension = os.path.splitext(uploaded_file.filename)[1].lower()
-    if extension not in {".webm", ".mkv"}:
+    safe_name = secure_filename(uploaded_file.filename)
+    if not safe_name:
         return render_template(
             "dashboard.html",
-            error="Unsupported file type. Please upload a WebM or MKV file.",
+            error="The selected video has an invalid filename.",
             downloads=list_recent_files(DOWNLOAD_DIR),
             converted=list_recent_files(CONVERTED_DIR),
         )
 
-    safe_name = os.path.basename(uploaded_file.filename)
     source_path = UPLOAD_DIR / safe_name
     uploaded_file.save(source_path)
 
