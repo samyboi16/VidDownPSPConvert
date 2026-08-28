@@ -24,7 +24,7 @@ Before running the app, install:
 ## Clone the project
 
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/samyboi16/VidDownPSPConvert.git
 cd "Vid downlaoder and ffmpeging"
 ```
 
