@@ -4,13 +4,13 @@ A small Flask web app for:
 
 - downloading videos from YouTube using `yt-dlp`
 - choosing 720p, 1080p, or audio-only M4A output
-- converting local `.webm` and `.mkv` files to a PSP-compatible MP4 using the project preset file
+- converting local video files to a PSP-compatible MP4 using the project preset file
 
 ## Features
 
 - Download YouTube videos directly from the dashboard
 - Save downloaded files in the `downloads` folder
-- Convert uploaded WebM/MKV files into PSP-style MP4 output using the preset from `psp-preset.json`
+- Convert uploaded video files into PSP-style MP4 output using the preset from `psp-preset.json`
 - Browse recent downloads and converted files from the UI
 
 ## Requirements
@@ -18,13 +18,13 @@ A small Flask web app for:
 Before running the app, install:
 
 - Python 3.10+
-- FFmpeg
+- FFmpeg, or the bundled `imageio-ffmpeg` fallback installed from `requirements.txt`
 - Git
 
 ## Clone the project
 
 ```bash
-git clone https://github.com/samyboi16/VidDownPSPConvert.git
+git clone <your-repository-url>
 cd "Vid downlaoder and ffmpeging"
 ```
 
@@ -46,10 +46,32 @@ python -m venv .venv
 
 ```bash
 pip install --upgrade pip
-pip install Flask yt-dlp
+pip install -r requirements.txt
 ```
 
-## Make sure FFmpeg is available
+## FFmpeg setup
+
+The app looks for FFmpeg in this order:
+
+1. The executable specified by the `FFMPEG_PATH` environment variable
+2. An `ffmpeg` executable on your system `PATH`
+3. The platform-specific binary supplied by `imageio-ffmpeg`
+
+The third option allows the app to work without a separate FFmpeg installation on Windows, macOS, and Linux. For production or redistribution, installing FFmpeg system-wide or shipping a legally licensed binary yourself is usually more predictable.
+
+To use a custom executable:
+
+```bash
+export FFMPEG_PATH=/path/to/ffmpeg
+```
+
+PowerShell:
+
+```powershell
+$env:FFMPEG_PATH = "C:\\path\\to\\ffmpeg.exe"
+```
+
+To verify a system installation:
 
 Verify it works:
 
