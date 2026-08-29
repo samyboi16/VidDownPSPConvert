@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -27,30 +28,52 @@ with open(BASE_DIR / "psp-preset.json", "r", encoding="utf-8") as preset_file:
     PSP_PRESET = json.load(preset_file)
 
 
-    def update_job(job_id: str, **changes):
-        with jobs_lock:
-            jobs[job_id].update(changes)
+def update_job(job_id: str, **changes):
+    with jobs_lock:
+        jobs[job_id].update(changes)
 
 
-    def create_job(job_type: str):
-        job_id = uuid.uuid4().hex
-        with jobs_lock:
-            jobs[job_id] = {
-                "type": job_type,
-                "status": "queued",
-                "percent": 0,
-                "message": "Waiting to start...",
-            }
-        return job_id
+def create_job(job_type: str):
+    job_id = uuid.uuid4().hex
+    with jobs_lock:
+        jobs[job_id] = {
+            "type": job_type,
+            "status": "queued",
+            "percent": 0,
+            "message": "Waiting to start...",
+        }
+    return job_id
 
 
-    def run_job(job_id: str, worker):
-        update_job(job_id, status="running", message="Starting...")
-        try:
-            result = worker()
-            update_job(job_id, status="completed", percent=100, message="Finished.", result=result)
-        except Exception as exc:  # pragma: no cover - runtime failure path
-            update_job(job_id, status="failed", message=str(exc), error=str(exc))
+def run_job(job_id: str, worker):
+    update_job(job_id, status="running", message="Starting...")
+    try:
+        result = worker()
+        update_job(job_id, status="completed", percent=100, message="Finished.", result=result)
+    except Exception as exc:  # pragma: no cover - runtime failure path
+        update_job(job_id, status="failed", message=str(exc), error=str(exc))
+
+
+def resolve_ffmpeg():
+    configured_path = os.environ.get("FFMPEG_PATH")
+    if configured_path:
+        configured_executable = Path(configured_path).expanduser()
+        if configured_executable.is_file():
+            return str(configured_executable)
+        raise FileNotFoundError(f"FFMPEG_PATH does not point to a file: {configured_executable}")
+
+    system_executable = shutil.which("ffmpeg")
+    if system_executable:
+        return system_executable
+
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except (ImportError, RuntimeError) as exc:
+        raise FileNotFoundError(
+            "FFmpeg was not found. Install it, set FFMPEG_PATH, or install imageio-ffmpeg."
+        ) from exc
 
 
 def list_recent_files(folder: Path):
@@ -92,7 +115,7 @@ def download_from_youtube(url: str, quality: str, progress_callback=None):
         "format": resolve_download_quality(quality),
         "outtmpl": output_template,
         "noplaylist": True,
-        "ffmpeg_location": "/usr/bin/ffmpeg",
+        "ffmpeg_location": resolve_ffmpeg(),
         "quiet": True,
         "no_warnings": True,
         "merge_output_format": "mp4",
@@ -152,9 +175,7 @@ def convert_to_psp_mp4(input_path: str, output_dir: Path, progress_callback=None
     if not input_file.is_file():
         raise FileNotFoundError(f"Uploaded video was not saved: {input_file}")
 
-    ffmpeg_executable = shutil.which("ffmpeg")
-    if not ffmpeg_executable:
-        raise FileNotFoundError("FFmpeg was not found in PATH. Install FFmpeg and restart the app.")
+    ffmpeg_executable = resolve_ffmpeg()
 
     output_file = output_dir / f"{input_file.stem}_psp.mp4"
 
