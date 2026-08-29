@@ -1,11 +1,13 @@
 import json
-import os
 import shutil
 import subprocess
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import yt_dlp
-from flask import Flask, abort, render_template, request, send_from_directory
+from flask import Flask, abort, jsonify, render_template, request, send_from_directory
 from werkzeug.utils import secure_filename
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -17,9 +19,38 @@ for folder in (DOWNLOAD_DIR, CONVERTED_DIR, UPLOAD_DIR):
     folder.mkdir(exist_ok=True)
 
 app = Flask(__name__, template_folder=str(BASE_DIR))
+job_executor = ThreadPoolExecutor(max_workers=2)
+jobs = {}
+jobs_lock = threading.Lock()
 
 with open(BASE_DIR / "psp-preset.json", "r", encoding="utf-8") as preset_file:
     PSP_PRESET = json.load(preset_file)
+
+
+    def update_job(job_id: str, **changes):
+        with jobs_lock:
+            jobs[job_id].update(changes)
+
+
+    def create_job(job_type: str):
+        job_id = uuid.uuid4().hex
+        with jobs_lock:
+            jobs[job_id] = {
+                "type": job_type,
+                "status": "queued",
+                "percent": 0,
+                "message": "Waiting to start...",
+            }
+        return job_id
+
+
+    def run_job(job_id: str, worker):
+        update_job(job_id, status="running", message="Starting...")
+        try:
+            result = worker()
+            update_job(job_id, status="completed", percent=100, message="Finished.", result=result)
+        except Exception as exc:  # pragma: no cover - runtime failure path
+            update_job(job_id, status="failed", message=str(exc), error=str(exc))
 
 
 def list_recent_files(folder: Path):
@@ -38,9 +69,24 @@ def resolve_download_quality(quality: str):
     return quality_map.get(quality, quality_map["1080p"])
 
 
-def download_from_youtube(url: str, quality: str):
+def download_from_youtube(url: str, quality: str, progress_callback=None):
     safe_name = url.rsplit("/", 1)[-1] or "video"
     output_template = str(DOWNLOAD_DIR / "%(title)s.%(ext)s")
+
+    def download_progress(progress):
+        if not progress_callback:
+            return
+        if progress.get("status") == "downloading":
+            downloaded = progress.get("downloaded_bytes", 0)
+            total = progress.get("total_bytes") or progress.get("total_bytes_estimate")
+            percent = round(downloaded * 100 / total, 1) if total else 0
+            eta = progress.get("eta")
+            message = f"Downloading... {percent:.1f}%"
+            if eta is not None:
+                message += f" (about {eta}s remaining)"
+            progress_callback(percent, message)
+        elif progress.get("status") == "finished":
+            progress_callback(100, "Download complete. Processing file...")
 
     ydl_opts = {
         "format": resolve_download_quality(quality),
@@ -51,6 +97,7 @@ def download_from_youtube(url: str, quality: str):
         "no_warnings": True,
         "merge_output_format": "mp4",
         "paths": {"home": str(DOWNLOAD_DIR)},
+        "progress_hooks": [download_progress],
     }
 
     if quality == "audio_m4a":
@@ -99,7 +146,7 @@ def psp_preset_settings():
     }
 
 
-def convert_to_psp_mp4(input_path: str, output_dir: Path):
+def convert_to_psp_mp4(input_path: str, output_dir: Path, progress_callback=None):
     settings = psp_preset_settings()
     input_file = Path(input_path).resolve()
     if not input_file.is_file():
@@ -147,9 +194,48 @@ def convert_to_psp_mp4(input_path: str, output_dir: Path):
         str(output_file),
     ]
 
-    result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "FFmpeg conversion failed.")
+    duration = None
+    ffprobe_executable = shutil.which("ffprobe")
+    try:
+        if not ffprobe_executable:
+            raise FileNotFoundError
+        probe = subprocess.run(
+            [
+                ffprobe_executable,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(input_file),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        duration = float(probe.stdout.strip())
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        pass
+
+    ffmpeg_cmd[1:1] = ["-progress", "pipe:1", "-nostats"]
+    process = subprocess.Popen(
+        ffmpeg_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    stderr_output = []
+    for line in process.stdout:
+        if line.startswith("out_time_ms=") and progress_callback and duration:
+            elapsed = int(line.split("=", 1)[1]) / 1_000_000
+            progress_callback(min(round(elapsed * 100 / duration, 1), 99.9), "Converting video...")
+
+    stderr_output.append(process.stderr.read())
+    return_code = process.wait()
+    if return_code != 0:
+        raise RuntimeError("\n".join(stderr_output).strip() or "FFmpeg conversion failed.")
 
     return output_file.name
 
@@ -165,69 +251,54 @@ def download_video():
     quality = request.form.get("quality") or "1080p"
 
     if not url:
-        return render_template(
-            "dashboard.html",
-            error="Please add a valid video URL before downloading.",
-            downloads=list_recent_files(DOWNLOAD_DIR),
-            converted=list_recent_files(CONVERTED_DIR),
-        )
+        return jsonify(error="Please add a valid video URL before downloading."), 400
 
-    try:
-        filename = download_from_youtube(url, quality)
-        success_message = f"Downloaded successfully: {filename}"
-        return render_template(
-            "dashboard.html",
-            success=success_message,
-            downloads=list_recent_files(DOWNLOAD_DIR),
-            converted=list_recent_files(CONVERTED_DIR),
-        )
-    except Exception as exc:  # pragma: no cover - runtime failure path
-        return render_template(
-            "dashboard.html",
-            error=f"Download failed: {exc}",
-            downloads=list_recent_files(DOWNLOAD_DIR),
-            converted=list_recent_files(CONVERTED_DIR),
-        )
+    job_id = create_job("download")
+    job_executor.submit(
+        run_job,
+        job_id,
+        lambda: download_from_youtube(
+            url,
+            quality,
+            lambda percent, message: update_job(job_id, percent=percent, message=message),
+        ),
+    )
+    return jsonify(job_id=job_id)
 
 
 @app.route("/convert", methods=["POST"])
 def convert_video():
     uploaded_file = request.files.get("video_file")
     if not uploaded_file or not uploaded_file.filename:
-        return render_template(
-            "dashboard.html",
-            error="Please select a video file to convert.",
-            downloads=list_recent_files(DOWNLOAD_DIR),
-            converted=list_recent_files(CONVERTED_DIR),
-        )
+        return jsonify(error="Please select a video file to convert."), 400
 
     safe_name = secure_filename(uploaded_file.filename)
     if not safe_name:
-        return render_template(
-            "dashboard.html",
-            error="The selected video has an invalid filename.",
-            downloads=list_recent_files(DOWNLOAD_DIR),
-            converted=list_recent_files(CONVERTED_DIR),
-        )
+        return jsonify(error="The selected video has an invalid filename."), 400
 
-    source_path = UPLOAD_DIR / safe_name
+    source_path = UPLOAD_DIR / f"{uuid.uuid4().hex}_{safe_name}"
     uploaded_file.save(source_path)
 
-    try:
-        output_name = convert_to_psp_mp4(str(source_path), CONVERTED_DIR)
-        return render_template(
-            "dashboard.html",
-            success=f"Converted to PSP-ready MP4: {output_name}",
-            downloads=list_recent_files(DOWNLOAD_DIR),
-            converted=list_recent_files(CONVERTED_DIR),
-        )
-    except Exception as exc:
-        return render_template(
-            "dashboard.html",
-            error=f"Conversion failed: {exc}",
-            downloads=list_recent_files(DOWNLOAD_DIR),
-            converted=list_recent_files(CONVERTED_DIR),
-        )
+    job_id = create_job("convert")
+    job_executor.submit(
+        run_job,
+        job_id,
+        lambda: convert_to_psp_mp4(
+            str(source_path),
+            CONVERTED_DIR,
+            lambda percent, message: update_job(job_id, percent=percent, message=message),
+        ),
+    )
+    return jsonify(job_id=job_id)
+
+
+@app.route("/progress/<job_id>")
+def job_progress(job_id: str):
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            abort(404)
+        return jsonify(job)
 
 
 @app.route("/files/<folder>/<filename>")
