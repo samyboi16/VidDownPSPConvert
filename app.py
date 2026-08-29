@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -74,6 +75,19 @@ def resolve_ffmpeg():
         raise FileNotFoundError(
             "FFmpeg was not found. Install it, set FFMPEG_PATH, or install imageio-ffmpeg."
         ) from exc
+
+
+def get_video_duration(ffmpeg_executable: str, input_file: Path):
+    probe = subprocess.run(
+        [ffmpeg_executable, "-hide_banner", "-i", str(input_file)],
+        capture_output=True,
+        text=True,
+    )
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", probe.stderr)
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
 def list_recent_files(folder: Path):
@@ -215,45 +229,26 @@ def convert_to_psp_mp4(input_path: str, output_dir: Path, progress_callback=None
         str(output_file),
     ]
 
-    duration = None
-    ffprobe_executable = shutil.which("ffprobe")
     try:
-        if not ffprobe_executable:
-            raise FileNotFoundError
-        probe = subprocess.run(
-            [
-                ffprobe_executable,
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(input_file),
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        duration = float(probe.stdout.strip())
-    except (OSError, ValueError, subprocess.CalledProcessError):
-        pass
+        duration = get_video_duration(ffmpeg_executable, input_file)
+    except OSError:
+        duration = None
 
     ffmpeg_cmd[1:1] = ["-progress", "pipe:1", "-nostats"]
     process = subprocess.Popen(
         ffmpeg_cmd,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
     )
     stderr_output = []
     for line in process.stdout:
+        stderr_output.append(line)
         if line.startswith("out_time_ms=") and progress_callback and duration:
             elapsed = int(line.split("=", 1)[1]) / 1_000_000
             progress_callback(min(round(elapsed * 100 / duration, 1), 99.9), "Converting video...")
 
-    stderr_output.append(process.stderr.read())
     return_code = process.wait()
     if return_code != 0:
         raise RuntimeError("\n".join(stderr_output).strip() or "FFmpeg conversion failed.")
