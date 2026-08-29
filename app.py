@@ -183,7 +183,7 @@ def psp_preset_settings():
     }
 
 
-def convert_to_psp_mp4(input_path: str, output_dir: Path, progress_callback=None):
+def convert_to_psp_mp4(input_path: str, output_dir: Path, progress_callback=None, output_stem=None):
     settings = psp_preset_settings()
     input_file = Path(input_path).resolve()
     if not input_file.is_file():
@@ -191,7 +191,8 @@ def convert_to_psp_mp4(input_path: str, output_dir: Path, progress_callback=None
 
     ffmpeg_executable = resolve_ffmpeg()
 
-    output_file = output_dir / f"{input_file.stem}_psp.mp4"
+    output_name_stem = output_stem or input_file.stem
+    output_file = output_dir / f"{output_name_stem}_to_psp.mp4"
 
     ffmpeg_cmd = [
         ffmpeg_executable,
@@ -303,6 +304,7 @@ def convert_video():
             str(source_path),
             CONVERTED_DIR,
             lambda percent, message: update_job(job_id, percent=percent, message=message),
+            Path(safe_name).stem,
         ),
     )
     return jsonify(job_id=job_id)
