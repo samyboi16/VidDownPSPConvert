@@ -198,7 +198,7 @@
 <main class="flex-grow flex flex-col items-center justify-center px-gutter py-xl max-w-container-max mx-auto w-full gap-xl">
   <section class="w-full max-w-5xl flex flex-col gap-lg items-center text-center">
     <h1 class="font-display-lg text-display-lg md:text-[64px] md:leading-[72px] text-on-surface">Effortless Media Capture.</h1>
-    <p class="text-on-surface-variant max-w-xl mx-auto">Download from YouTube or convert local WebM/MKV files into a PSP-ready MP4 using the preset file in this project.</p>
+    <p class="text-on-surface-variant max-w-xl mx-auto">Download from YouTube or convert local video files into a PSP-ready MP4 using the preset file in this project.</p>
 
     {% if success %}
       <div class="w-full max-w-4xl rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-left text-emerald-200">
@@ -213,7 +213,7 @@
     {% endif %}
 
     <div class="grid w-full grid-cols-1 gap-md lg:grid-cols-2">
-      <form method="post" action="/download" class="rounded-3xl border border-outline-variant/30 bg-surface-container p-md flex flex-col gap-md text-left shadow-lg shadow-black/20">
+      <form id="download-form" method="post" action="/download" class="rounded-3xl border border-outline-variant/30 bg-surface-container p-md flex flex-col gap-md text-left shadow-lg shadow-black/20">
         <div class="flex items-center justify-between">
           <div>
             <p class="text-label-sm text-primary uppercase tracking-[0.2em]">Download</p>
@@ -248,9 +248,16 @@
         <button type="submit" class="orange-gradient mt-2 rounded-full px-5 py-3 font-bold text-on-primary-container shadow-lg shadow-orange-950/40 hover:brightness-110 transition-all duration-200">
           Download video
         </button>
+        <div id="download-progress" class="hidden rounded-2xl border border-outline-variant/30 bg-surface-container-lowest p-3" aria-live="polite">
+          <div class="mb-2 flex justify-between gap-3 text-sm text-on-surface-variant">
+            <span data-progress-message>Waiting to start...</span>
+            <span data-progress-percent>0%</span>
+          </div>
+          <progress data-progress-bar class="h-2 w-full accent-primary" max="100" value="0"></progress>
+        </div>
       </form>
 
-      <form method="post" action="/convert" enctype="multipart/form-data" class="rounded-3xl border border-outline-variant/30 bg-surface-container p-md flex flex-col gap-md text-left shadow-lg shadow-black/20">
+      <form id="convert-form" method="post" action="/convert" enctype="multipart/form-data" class="rounded-3xl border border-outline-variant/30 bg-surface-container p-md flex flex-col gap-md text-left shadow-lg shadow-black/20">
         <div class="flex items-center justify-between">
           <div>
             <p class="text-label-sm text-secondary uppercase tracking-[0.2em]">Convert</p>
@@ -260,8 +267,8 @@
         </div>
 
         <label class="flex flex-col gap-2 text-sm text-on-surface-variant">
-          Upload a WebM or MKV file
-          <input name="video_file" type="file" accept=".webm,.mkv,video/webm,video/x-matroska" required class="block w-full rounded-2xl border border-dashed border-outline-variant bg-surface-container-lowest p-3 text-on-surface file:mr-3 file:rounded-full file:border-0 file:bg-primary file:px-4 file:py-2 file:font-bold file:text-on-primary-container" />
+          Upload a video file
+          <input name="video_file" type="file" accept="video/*" required class="block w-full rounded-2xl border border-dashed border-outline-variant bg-surface-container-lowest p-3 text-on-surface file:mr-3 file:rounded-full file:border-0 file:bg-primary file:px-4 file:py-2 file:font-bold file:text-on-primary-container" />
         </label>
 
         <div class="rounded-2xl border border-outline-variant/30 bg-surface-container-lowest p-3 text-sm text-on-surface-variant">
@@ -271,6 +278,13 @@
         <button type="submit" class="mt-2 bg-secondary-container text-on-secondary-container rounded-full px-5 py-3 font-bold hover:brightness-110 transition-all duration-200">
           Convert to PSP MP4
         </button>
+        <div id="convert-progress" class="hidden rounded-2xl border border-outline-variant/30 bg-surface-container-lowest p-3" aria-live="polite">
+          <div class="mb-2 flex justify-between gap-3 text-sm text-on-surface-variant">
+            <span data-progress-message>Waiting to start...</span>
+            <span data-progress-percent>0%</span>
+          </div>
+          <progress data-progress-bar class="h-2 w-full accent-secondary" max="100" value="0"></progress>
+        </div>
       </form>
     </div>
   </section>
@@ -339,5 +353,58 @@
 </div>
 </footer>
 
+<script>
+  function pollProgress(form, job, jobId) {
+    const panel = document.getElementById(`${job}-progress`);
+    const bar = panel.querySelector('[data-progress-bar]');
+    const message = panel.querySelector('[data-progress-message]');
+    const percent = panel.querySelector('[data-progress-percent]');
+    panel.classList.remove('hidden');
+
+    const poll = async () => {
+      const response = await fetch(`/progress/${jobId}`);
+      const state = await response.json();
+      const value = Number(state.percent || 0);
+      bar.value = value;
+      percent.textContent = `${value.toFixed(1)}%`;
+      message.textContent = state.message || 'Working...';
+
+      if (state.status === 'completed') {
+        message.textContent = state.result ? `Finished: ${state.result}` : 'Finished.';
+        window.location.reload();
+      } else if (state.status === 'failed') {
+        message.textContent = `Failed: ${state.error || 'Unknown error'}`;
+        form.querySelector('button[type="submit"]').disabled = false;
+      } else {
+        window.setTimeout(poll, 500);
+      }
+    };
+    poll().catch((error) => {
+      message.textContent = `Progress unavailable: ${error.message}`;
+      form.querySelector('button[type="submit"]').disabled = false;
+    });
+  }
+
+  for (const form of document.querySelectorAll('form[action="/download"], form[action="/convert"]')) {
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = form.querySelector('button[type="submit"]');
+      button.disabled = true;
+      const job = form.action.endsWith('/download') ? 'download' : 'convert';
+      const response = await fetch(form.action, {
+        method: 'POST',
+        body: new FormData(form)
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        document.getElementById(`${job}-progress`).classList.remove('hidden');
+        document.querySelector(`#${job}-progress [data-progress-message]`).textContent = result.error;
+        button.disabled = false;
+        return;
+      }
+      pollProgress(form, job, result.job_id);
+    });
+  }
+</script>
 
 </body></html>
