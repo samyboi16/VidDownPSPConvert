@@ -84,7 +84,7 @@ If FFmpeg is not installed, install it using your OS package manager.
 ## Run the app
 
 ```bash
-python app.py
+python run.py
 ```
 
 Then open:
