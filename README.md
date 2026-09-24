@@ -1,4 +1,4 @@
-# NovaVideo Downloader and PSP Converter
+# VidDownPSPConvert Downloader and PSP Converter
 
 A small Flask web app for:
 
